@@ -1,0 +1,720 @@
+diff --git a/.env.example b/.env.example
+index 0ff6741..35959ae 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,3 +1,11 @@
+-# Optional. Without this, the app falls back to Apple's public iTunes lookup API.
+-# With it, the resolver also queries the Apple Music catalog API for richer metadata.
++# Recommended: let the server generate short-lived Apple Music developer tokens.
++APPLE_MUSIC_TEAM_ID=
++APPLE_MUSIC_KEY_ID=
++
++# Paste the contents of your Apple Media Services .p8 private key into Vercel as a secret.
++# Never commit the real key to GitHub.
++APPLE_MUSIC_PRIVATE_KEY=
++
++# Optional alternative: provide a pre-generated signed Apple Music developer JWT instead.
++# If this is set, it takes precedence over the three values above.
+ APPLE_MUSIC_DEVELOPER_TOKEN=
+diff --git a/README.md b/README.md
+index f3323a8..0b94dd6 100644
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,6 @@
+ # Apple Music Asset Extractor
+ 
+-A Vercel-ready Next.js utility for inspecting Apple Music music-video metadata and downloading Apple-provided public assets.
++A Vercel-ready Next.js utility for inspecting Apple Music music-video metadata, downloading Apple-provided public assets, and playing full music videos through an authorized Apple Music subscription using MusicKit on the Web.
+ 
+ ## What it does
+ 
+@@ -10,11 +10,12 @@ A Vercel-ready Next.js utility for inspecting Apple Music music-video metadata a
+ - Downloads Apple-provided public preview video
+ - Downloads artwork as JPG or converts it to PNG
+ - Exports metadata to JSON
+-- Optionally uses an Apple Music developer token for richer catalog metadata (4K/HDR flags, ISRC, HLS preview metadata)
++- Uses MusicKit on the Web for full subscriber playback after Apple Music authorization
++- Uses the Apple Music API for richer metadata such as 4K/HDR flags, ISRC, and HLS preview metadata when developer credentials are configured
+ 
+ ## What it intentionally does not do
+ 
+-It does not decrypt, defeat, or bypass DRM on full Apple Music subscription streams.
++It does not decrypt, defeat, or bypass DRM on full Apple Music subscription streams. Full videos are streamed by Apple's MusicKit player inside the browser.
+ 
+ ## Local development
+ 
+@@ -25,16 +26,41 @@ npm run dev
+ 
+ Open `http://localhost:3000`.
+ 
+-## Optional Apple Music API token
++## Apple Music / MusicKit setup
+ 
+-Copy `.env.example` to `.env.local` and set:
++MusicKit subscriber playback requires Apple Music developer credentials. The recommended configuration lets the Vercel server generate a short-lived developer JWT on demand instead of storing a long-lived token.
++
++1. Use an Apple Developer Program team that can create Media IDs and Media Services keys.
++2. In Certificates, Identifiers & Profiles, create a Media ID with MusicKit enabled.
++3. Create a Media Services private key and associate it with the Media ID.
++4. In Vercel Project Settings → Environment Variables, add:
+ 
+ ```bash
+-APPLE_MUSIC_DEVELOPER_TOKEN=your_token_here
++APPLE_MUSIC_TEAM_ID=YOUR_TEAM_ID
++APPLE_MUSIC_KEY_ID=YOUR_KEY_ID
++APPLE_MUSIC_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+ ```
+ 
+-Without a token, the app falls back to Apple's public iTunes Lookup API.
++The app generates one-hour ES256 developer tokens server-side. Browser tokens are generated with an Apple `origin` claim tied to the deployed site's origin. The `.p8` private key stays on the server and is never returned to the browser.
++
++Never commit the `.p8` private key to GitHub.
++
++### Pre-generated token alternative
++
++If you prefer, you can instead set:
++
++```bash
++APPLE_MUSIC_DEVELOPER_TOKEN=your_signed_jwt_here
++```
++
++That value takes precedence over automatic signing.
++
++Without developer credentials, metadata and public preview extraction still fall back to Apple's public iTunes Lookup API, but subscriber sign-in/full playback is disabled.
++
++## Subscriber authorization
++
++The browser loads Apple's MusicKit v3 library. When the user clicks **Sign in to Apple Music**, MusicKit handles the Apple account authorization and Music User Token. After authorization, the site queues the selected catalog music video and plays it in the page through MusicKit.
+ 
+ ## Deploy to Vercel
+ 
+-Import the GitHub repository into Vercel. Next.js is auto-detected. If you want richer Apple Music API metadata, add `APPLE_MUSIC_DEVELOPER_TOKEN` in Vercel Project Settings → Environment Variables.
++Link/import the GitHub repository in Vercel. Next.js is auto-detected. Add the Apple Music environment variables above for Production (and Preview if desired), then redeploy.
+diff --git a/app/api/musickit-token/route.js b/app/api/musickit-token/route.js
+new file mode 100644
+index 0000000..32e322c
+--- /dev/null
++++ b/app/api/musickit-token/route.js
+@@ -0,0 +1,43 @@
++import { NextResponse } from "next/server";
++import { getAppleMusicDeveloperToken } from "../../../lib/appleMusicToken";
++
++export const runtime = "nodejs";
++export const dynamic = "force-dynamic";
++
++export async function GET(request) {
++  let origin;
++  try {
++    origin = new URL(request.url).origin;
++  } catch {
++    origin = undefined;
++  }
++
++  let token;
++  try {
++    token = getAppleMusicDeveloperToken({ origin });
++  } catch {
++    return NextResponse.json(
++      {
++        configured: false,
++        error: "Apple Music credentials are configured, but the Media Services private key could not sign a developer token."
++      },
++      { status: 500, headers: { "Cache-Control": "no-store" } }
++    );
++  }
++
++  if (!token) {
++    return NextResponse.json(
++      {
++        configured: false,
++        error:
++          "Apple Music subscriber playback is not configured. Add APPLE_MUSIC_TEAM_ID, APPLE_MUSIC_KEY_ID, and APPLE_MUSIC_PRIVATE_KEY in Vercel, or provide APPLE_MUSIC_DEVELOPER_TOKEN."
++      },
++      { status: 503, headers: { "Cache-Control": "no-store" } }
++    );
++  }
++
++  return NextResponse.json(
++    { configured: true, developerToken: token },
++    { headers: { "Cache-Control": "no-store" } }
++  );
++}
+diff --git a/app/api/resolve/route.js b/app/api/resolve/route.js
+index fee5959..5bfbd56 100644
+--- a/app/api/resolve/route.js
++++ b/app/api/resolve/route.js
+@@ -1,3 +1,4 @@
++import { getAppleMusicDeveloperToken } from "../../../lib/appleMusicToken";
+ import { NextResponse } from "next/server";
+ 
+ export const runtime = "nodejs";
+@@ -100,7 +101,12 @@ export async function POST(request) {
+   try {
+     const body = await request.json();
+     const { id, storefront } = parseAppleMusicUrl(body?.url || "");
+-    const token = process.env.APPLE_MUSIC_DEVELOPER_TOKEN?.trim();
++    let token = null;
++    try {
++      token = getAppleMusicDeveloperToken();
++    } catch {
++      token = null;
++    }
+ 
+     if (token) {
+       const rich = await appleMusicLookup(id, storefront, token);
+diff --git a/app/globals.css b/app/globals.css
+index d3def44..1f51c39 100644
+--- a/app/globals.css
++++ b/app/globals.css
+@@ -71,3 +71,115 @@ footer { color: #5c5f65; font-size: 12px; border-top: 1px solid var(--line); pad
+   .stats div:nth-child(2n) { border-right: 0; }
+   .stats div:nth-last-child(-n+2) { border-bottom: 0 !important; }
+ }
++
++.subscriberSection {
++  margin-top: 48px;
++  border: 1px solid var(--line);
++  border-radius: 24px;
++  background: var(--panel);
++  padding: 26px;
++  overflow: hidden;
++}
++.subscriberHeader {
++  display: flex;
++  align-items: flex-start;
++  justify-content: space-between;
++  gap: 24px;
++}
++.subscriberHeader .eyebrow { margin-bottom: 10px; }
++.subscriberHeader h3 {
++  margin: 0 0 8px;
++  font-size: clamp(27px, 4vw, 40px);
++  letter-spacing: -.035em;
++}
++.subscriberHeader p {
++  margin: 0;
++  max-width: 690px;
++  color: var(--muted);
++  line-height: 1.55;
++}
++.subscriberActions,
++.playerActions {
++  display: flex;
++  align-items: center;
++  flex-wrap: wrap;
++  gap: 10px;
++}
++.subscriberActions { justify-content: flex-end; }
++.connectedBadge {
++  display: inline-flex;
++  align-items: center;
++  gap: 7px;
++  border: 1px solid rgba(88, 215, 125, .25);
++  background: rgba(88, 215, 125, .10);
++  color: #a9edbd;
++  border-radius: 999px;
++  padding: 9px 12px;
++  font-size: 12px;
++  font-weight: 800;
++}
++.connectedBadge::before {
++  content: "";
++  width: 7px;
++  height: 7px;
++  border-radius: 50%;
++  background: currentColor;
++}
++.musicMessage {
++  margin: 20px 0 0;
++  border: 1px solid var(--line);
++  background: rgba(255, 255, 255, .035);
++  border-radius: 13px;
++  padding: 12px 14px;
++  color: #afb2b8;
++  font-size: 13px;
++}
++.musicError {
++  border-color: rgba(250, 45, 72, .35);
++  background: rgba(250, 45, 72, .08);
++  color: #ff9dab;
++}
++.playerActions { margin: 22px 0 14px; }
++.playButton {
++  border-color: transparent;
++  background: var(--accent);
++}
++.videoShell {
++  position: relative;
++  width: 100%;
++  aspect-ratio: 16 / 9;
++  overflow: hidden;
++  border: 1px solid var(--line);
++  border-radius: 18px;
++  background: #020203;
++}
++.videoShell video {
++  display: block;
++  width: 100%;
++  height: 100%;
++  object-fit: contain;
++  background: #000;
++}
++.videoPlaceholder {
++  position: absolute;
++  inset: 0;
++  display: grid;
++  place-items: center;
++  pointer-events: none;
++  color: #6f7279;
++  font-size: 13px;
++  background:
++    radial-gradient(circle at 50% 0%, rgba(250,45,72,.09), transparent 42%),
++    #050506;
++}
++.subscriberFootnote {
++  margin: 13px 2px 0;
++  color: #686b71;
++  font-size: 11px;
++  line-height: 1.5;
++}
++@media (max-width: 760px) {
++  .subscriberSection { padding: 20px; }
++  .subscriberHeader { flex-direction: column; }
++  .subscriberActions { justify-content: flex-start; }
++}
+diff --git a/app/page.js b/app/page.js
+index 105b10b..6aebb85 100644
+--- a/app/page.js
++++ b/app/page.js
+@@ -1,6 +1,6 @@
+ "use client";
+ 
+-import { useMemo, useState } from "react";
++import { useMemo, useRef, useState } from "react";
+ 
+ function formatDuration(ms) {
+   if (!ms && ms !== 0) return "—";
+@@ -20,12 +20,59 @@ function downloadJson(data, filename) {
+   URL.revokeObjectURL(url);
+ }
+ 
++let musicKitLoaderPromise;
++
++function loadMusicKit() {
++  if (typeof window === "undefined") {
++    return Promise.reject(new Error("MusicKit is only available in the browser."));
++  }
++
++  if (window.MusicKit) return Promise.resolve(window.MusicKit);
++  if (musicKitLoaderPromise) return musicKitLoaderPromise;
++
++  musicKitLoaderPromise = new Promise((resolve, reject) => {
++    const timeout = window.setTimeout(() => {
++      reject(new Error("Apple Music playback took too long to initialize."));
++    }, 15000);
++
++    const ready = () => {
++      window.clearTimeout(timeout);
++      if (window.MusicKit) resolve(window.MusicKit);
++      else reject(new Error("MusicKit loaded, but its browser API is unavailable."));
++    };
++
++    document.addEventListener("musickitloaded", ready, { once: true });
++
++    const existing = document.querySelector('script[data-apple-musickit="v3"]');
++    if (existing) return;
++
++    const script = document.createElement("script");
++    script.src = "https://js-cdn.music.apple.com/musickit/v3/musickit.js";
++    script.async = true;
++    script.dataset.appleMusickit = "v3";
++    script.onerror = () => {
++      window.clearTimeout(timeout);
++      reject(new Error("Could not load MusicKit from Apple."));
++    };
++    document.head.appendChild(script);
++  });
++
++  return musicKitLoaderPromise;
++}
++
+ export default function Home() {
+   const [url, setUrl] = useState("");
+   const [loading, setLoading] = useState(false);
+   const [error, setError] = useState("");
+   const [data, setData] = useState(null);
+ 
++  const [musicStatus, setMusicStatus] = useState("idle");
++  const [musicMessage, setMusicMessage] = useState("");
++  const [authorized, setAuthorized] = useState(false);
++  const [playing, setPlaying] = useState(false);
++  const musicRef = useRef(null);
++  const videoRef = useRef(null);
++
+   const safeName = useMemo(() => {
+     if (!data) return "apple-music-video";
+     return `${data.artist || "artist"} - ${data.title || "video"}`
+@@ -38,6 +85,7 @@ export default function Home() {
+     e.preventDefault();
+     setError("");
+     setData(null);
++    setPlaying(false);
+     setLoading(true);
+     try {
+       const res = await fetch("/api/resolve", {
+@@ -55,6 +103,124 @@ export default function Home() {
+     }
+   }
+ 
++  async function ensureMusicKit() {
++    if (musicRef.current) return musicRef.current;
++
++    setMusicStatus("loading");
++    setMusicMessage("Connecting to Apple Music…");
++
++    const tokenRes = await fetch("/api/musickit-token", { cache: "no-store" });
++    const tokenData = await tokenRes.json();
++    if (!tokenRes.ok || !tokenData.developerToken) {
++      throw new Error(
++        tokenData.error || "This site does not have an Apple Music developer token configured."
++      );
++    }
++
++    const MusicKit = await loadMusicKit();
++    await MusicKit.configure({
++      developerToken: tokenData.developerToken,
++      app: {
++        name: "Apple Music Asset Extractor",
++        build: "0.2.0"
++      }
++    });
++
++    const music = MusicKit.getInstance();
++    music.previewOnly = false;
++    musicRef.current = music;
++    setAuthorized(Boolean(music.isAuthorized));
++    setMusicStatus("ready");
++    setMusicMessage(
++      music.isAuthorized
++        ? "Apple Music is connected."
++        : "MusicKit is ready. Sign in to use your subscription."
++    );
++    return music;
++  }
++
++  async function signIn() {
++    try {
++      setMusicMessage("");
++      const music = await ensureMusicKit();
++      if (!music.isAuthorized) await music.authorize();
++      const ok = Boolean(music.isAuthorized);
++      setAuthorized(ok);
++      setMusicStatus(ok ? "authorized" : "ready");
++      setMusicMessage(
++        ok
++          ? "Signed in. Full playback will use your Apple Music subscription."
++          : "Apple Music authorization was cancelled."
++      );
++    } catch (err) {
++      setMusicStatus("error");
++      setMusicMessage(err.message || "Could not authorize Apple Music.");
++    }
++  }
++
++  async function signOut() {
++    try {
++      const music = musicRef.current;
++      if (music) {
++        await music.stop().catch(() => {});
++        await music.unauthorize();
++      }
++      setAuthorized(false);
++      setPlaying(false);
++      setMusicStatus("ready");
++      setMusicMessage("Signed out of Apple Music on this site.");
++    } catch (err) {
++      setMusicStatus("error");
++      setMusicMessage(err.message || "Could not sign out of Apple Music.");
++    }
++  }
++
++  async function playFullVideo() {
++    if (!data?.id) return;
++
++    try {
++      setMusicStatus("loading");
++      setMusicMessage("Preparing full subscriber playback…");
++      const music = await ensureMusicKit();
++
++      if (!music.isAuthorized) {
++        await music.authorize();
++      }
++      if (!music.isAuthorized) throw new Error("Apple Music authorization is required for full playback.");
++
++      setAuthorized(true);
++      music.previewOnly = false;
++
++      if (videoRef.current) {
++        music.videoContainerElement = videoRef.current;
++      }
++
++      await music.setQueue({ musicVideo: String(data.id) });
++      await music.play();
++
++      setPlaying(true);
++      setMusicStatus("authorized");
++      setMusicMessage("Playing the full music video through MusicKit.");
++    } catch (err) {
++      setPlaying(false);
++      setMusicStatus("error");
++      setMusicMessage(
++        err.message ||
++          "Full playback failed. Confirm that your Apple Music subscription is active and that this video is available in your storefront."
++      );
++    }
++  }
++
++  async function stopPlayback() {
++    try {
++      if (musicRef.current) await musicRef.current.stop();
++      setPlaying(false);
++      setMusicMessage("Playback stopped.");
++    } catch (err) {
++      setMusicMessage(err.message || "Could not stop playback.");
++    }
++  }
++
+   return (
+     <main>
+       <section className="hero">
+@@ -62,7 +228,7 @@ export default function Home() {
+         <h1>Asset Extractor</h1>
+         <p className="lede">
+           Paste an Apple Music music-video link to inspect metadata, download artwork,
+-          and save Apple-provided public preview media.
++          save Apple-provided public preview media, and play the full video with your subscription.
+         </p>
+ 
+         <form onSubmit={submit} className="searchCard">
+@@ -78,69 +244,124 @@ export default function Home() {
+             />
+             <button disabled={loading}>{loading ? "Resolving…" : "Extract"}</button>
+           </div>
+-          <div className="hint">Music-video links only. Full subscription streams are not decrypted or bypassed.</div>
++          <div className="hint">
++            Full subscriber playback uses Apple Music directly in your browser. Downloads remain limited to Apple-provided public assets.
++          </div>
+         </form>
+ 
+         {error && <div className="error">{error}</div>}
+       </section>
+ 
+       {data && (
+-        <section className="result">
+-          <div className="artWrap">
+-            {data.artwork?.displayUrl ? (
+-              <img src={data.artwork.displayUrl} alt={`${data.title} artwork`} />
+-            ) : (
+-              <div className="artPlaceholder">No artwork</div>
+-            )}
+-          </div>
+-
+-          <div className="details">
+-            <div className="sourceBadge">{data.source}</div>
+-            <h2>{data.title}</h2>
+-            <div className="artist">{data.artist}</div>
+-
+-            <div className="stats">
+-              <div><span>Duration</span><strong>{formatDuration(data.durationMs)}</strong></div>
+-              <div><span>Storefront</span><strong>{data.storefront?.toUpperCase() || "—"}</strong></div>
+-              <div><span>4K</span><strong>{data.has4K == null ? "—" : data.has4K ? "Yes" : "No"}</strong></div>
+-              <div><span>HDR</span><strong>{data.hasHDR == null ? "—" : data.hasHDR ? "Yes" : "No"}</strong></div>
+-              <div><span>Explicit</span><strong>{data.contentRating || "—"}</strong></div>
+-              <div><span>ID</span><strong className="mono">{data.id}</strong></div>
++        <>
++          <section className="result">
++            <div className="artWrap">
++              {data.artwork?.displayUrl ? (
++                <img src={data.artwork.displayUrl} alt={`${data.title} artwork`} />
++              ) : (
++                <div className="artPlaceholder">No artwork</div>
++              )}
+             </div>
+ 
+-            <div className="actions">
+-              {data.preview?.url && (
+-                <a className="primary" href={`/api/media?url=${encodeURIComponent(data.preview.url)}&name=${encodeURIComponent(safeName + " - preview")}`}>
+-                  Download Preview
+-                </a>
+-              )}
+-              {data.artwork?.originalUrl && (
+-                <a href={`/api/artwork?url=${encodeURIComponent(data.artwork.originalUrl)}&name=${encodeURIComponent(safeName)}&format=jpg`}>
+-                  Artwork JPG
+-                </a>
+-              )}
+-              {data.artwork?.originalUrl && (
+-                <a href={`/api/artwork?url=${encodeURIComponent(data.artwork.originalUrl)}&name=${encodeURIComponent(safeName)}&format=png`}>
+-                  Artwork PNG
+-                </a>
++            <div className="details">
++              <div className="sourceBadge">{data.source}</div>
++              <h2>{data.title}</h2>
++              <div className="artist">{data.artist}</div>
++
++              <div className="stats">
++                <div><span>Duration</span><strong>{formatDuration(data.durationMs)}</strong></div>
++                <div><span>Storefront</span><strong>{data.storefront?.toUpperCase() || "—"}</strong></div>
++                <div><span>4K</span><strong>{data.has4K == null ? "—" : data.has4K ? "Yes" : "No"}</strong></div>
++                <div><span>HDR</span><strong>{data.hasHDR == null ? "—" : data.hasHDR ? "Yes" : "No"}</strong></div>
++                <div><span>Explicit</span><strong>{data.contentRating || "—"}</strong></div>
++                <div><span>ID</span><strong className="mono">{data.id}</strong></div>
++              </div>
++
++              <div className="actions">
++                {data.preview?.url && (
++                  <a className="primary" href={`/api/media?url=${encodeURIComponent(data.preview.url)}&name=${encodeURIComponent(safeName + " - preview")}`}>
++                    Download Preview
++                  </a>
++                )}
++                {data.artwork?.originalUrl && (
++                  <a href={`/api/artwork?url=${encodeURIComponent(data.artwork.originalUrl)}&name=${encodeURIComponent(safeName)}&format=jpg`}>
++                    Artwork JPG
++                  </a>
++                )}
++                {data.artwork?.originalUrl && (
++                  <a href={`/api/artwork?url=${encodeURIComponent(data.artwork.originalUrl)}&name=${encodeURIComponent(safeName)}&format=png`}>
++                    Artwork PNG
++                  </a>
++                )}
++                <button className="secondary" onClick={() => downloadJson(data, `${safeName}.json`)}>
++                  Metadata JSON
++                </button>
++              </div>
++
++              {data.preview?.hlsUrl && (
++                <details>
++                  <summary>Preview stream details</summary>
++                  <div className="streamRow"><span>HLS</span><code>{data.preview.hlsUrl}</code></div>
++                </details>
+               )}
+-              <button className="secondary" onClick={() => downloadJson(data, `${safeName}.json`)}>
+-                Metadata JSON
+-              </button>
++
++              <div className="notice">
++                The extractor only downloads metadata, artwork, and preview assets Apple makes available without DRM circumvention.
++              </div>
++            </div>
++          </section>
++
++          <section className="subscriberSection">
++            <div className="subscriberHeader">
++              <div>
++                <div className="eyebrow">APPLE MUSIC SUBSCRIBER</div>
++                <h3>Full video playback</h3>
++                <p>
++                  Sign in through Apple, then stream this complete music video inside the site using your Apple Music subscription.
++                </p>
++              </div>
++
++              <div className="subscriberActions">
++                {!authorized ? (
++                  <button onClick={signIn} disabled={musicStatus === "loading"}>
++                    {musicStatus === "loading" ? "Connecting…" : "Sign in to Apple Music"}
++                  </button>
++                ) : (
++                  <>
++                    <span className="connectedBadge">Connected</span>
++                    <button className="secondary" onClick={signOut}>Sign out</button>
++                  </>
++                )}
++              </div>
+             </div>
+ 
+-            {data.preview?.hlsUrl && (
+-              <details>
+-                <summary>Preview stream details</summary>
+-                <div className="streamRow"><span>HLS</span><code>{data.preview.hlsUrl}</code></div>
+-              </details>
++            {musicMessage && (
++              <div className={`musicMessage ${musicStatus === "error" ? "musicError" : ""}`}>
++                {musicMessage}
++              </div>
+             )}
+ 
+-            <div className="notice">
+-              This tool only exposes metadata, artwork, and preview assets Apple makes available without DRM circumvention.
++            <div className="playerActions">
++              <button className="playButton" onClick={playFullVideo} disabled={musicStatus === "loading"}>
++                {playing ? "Playing Full Video" : "Play Full Video"}
++              </button>
++              {playing && <button className="secondary" onClick={stopPlayback}>Stop</button>}
+             </div>
+-          </div>
+-        </section>
++
++            <div className={`videoShell ${playing ? "active" : ""}`}>
++              <video ref={videoRef} controls playsInline />
++              {!playing && (
++                <div className="videoPlaceholder">
++                  <span>Full Apple Music video will appear here</span>
++                </div>
++              )}
++            </div>
++
++            <p className="subscriberFootnote">
++              MusicKit handles subscriber authorization and playback. This player does not expose or decrypt the protected video stream.
++            </p>
++          </section>
++        </>
+       )}
+ 
+       <footer>
+diff --git a/lib/appleMusicToken.js b/lib/appleMusicToken.js
+new file mode 100644
+index 0000000..b8f3606
+--- /dev/null
++++ b/lib/appleMusicToken.js
+@@ -0,0 +1,42 @@
++import crypto from "node:crypto";
++
++function base64url(input) {
++  const value = Buffer.isBuffer(input) ? input : Buffer.from(input);
++  return value.toString("base64url");
++}
++
++function normalizePrivateKey(value) {
++  return value?.replace(/\\n/g, "\n").trim();
++}
++
++export function getAppleMusicDeveloperToken({ origin } = {}) {
++  const staticToken = process.env.APPLE_MUSIC_DEVELOPER_TOKEN?.trim();
++  if (staticToken) return staticToken;
++
++  const teamId = process.env.APPLE_MUSIC_TEAM_ID?.trim();
++  const keyId = process.env.APPLE_MUSIC_KEY_ID?.trim();
++  const privateKey = normalizePrivateKey(process.env.APPLE_MUSIC_PRIVATE_KEY);
++
++  if (!teamId || !keyId || !privateKey) return null;
++
++  const now = Math.floor(Date.now() / 1000);
++  const header = { alg: "ES256", kid: keyId, typ: "JWT" };
++  const payload = {
++    iss: teamId,
++    iat: now,
++    exp: now + 60 * 60
++  };
++
++  if (origin) payload.origin = [origin];
++
++  const encodedHeader = base64url(JSON.stringify(header));
++  const encodedPayload = base64url(JSON.stringify(payload));
++  const signingInput = `${encodedHeader}.${encodedPayload}`;
++
++  const signature = crypto.sign("sha256", Buffer.from(signingInput), {
++    key: privateKey,
++    dsaEncoding: "ieee-p1363"
++  });
++
++  return `${signingInput}.${base64url(signature)}`;
++}

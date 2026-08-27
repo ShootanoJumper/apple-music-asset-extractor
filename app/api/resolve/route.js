@@ -1,3 +1,4 @@
+import { getAppleMusicDeveloperToken } from "../../../lib/appleMusicToken";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -100,7 +101,12 @@ export async function POST(request) {
   try {
     const body = await request.json();
     const { id, storefront } = parseAppleMusicUrl(body?.url || "");
-    const token = process.env.APPLE_MUSIC_DEVELOPER_TOKEN?.trim();
+    let token = null;
+    try {
+      token = getAppleMusicDeveloperToken();
+    } catch {
+      token = null;
+    }
 
     if (token) {
       const rich = await appleMusicLookup(id, storefront, token);

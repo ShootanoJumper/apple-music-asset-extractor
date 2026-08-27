@@ -71,3 +71,115 @@ footer { color: #5c5f65; font-size: 12px; border-top: 1px solid var(--line); pad
   .stats div:nth-child(2n) { border-right: 0; }
   .stats div:nth-last-child(-n+2) { border-bottom: 0 !important; }
 }
+
+.subscriberSection {
+  margin-top: 48px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--panel);
+  padding: 26px;
+  overflow: hidden;
+}
+.subscriberHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+.subscriberHeader .eyebrow { margin-bottom: 10px; }
+.subscriberHeader h3 {
+  margin: 0 0 8px;
+  font-size: clamp(27px, 4vw, 40px);
+  letter-spacing: -.035em;
+}
+.subscriberHeader p {
+  margin: 0;
+  max-width: 690px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+.subscriberActions,
+.playerActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.subscriberActions { justify-content: flex-end; }
+.connectedBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgba(88, 215, 125, .25);
+  background: rgba(88, 215, 125, .10);
+  color: #a9edbd;
+  border-radius: 999px;
+  padding: 9px 12px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.connectedBadge::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.musicMessage {
+  margin: 20px 0 0;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, .035);
+  border-radius: 13px;
+  padding: 12px 14px;
+  color: #afb2b8;
+  font-size: 13px;
+}
+.musicError {
+  border-color: rgba(250, 45, 72, .35);
+  background: rgba(250, 45, 72, .08);
+  color: #ff9dab;
+}
+.playerActions { margin: 22px 0 14px; }
+.playButton {
+  border-color: transparent;
+  background: var(--accent);
+}
+.videoShell {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #020203;
+}
+.videoShell video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+.videoPlaceholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  color: #6f7279;
+  font-size: 13px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(250,45,72,.09), transparent 42%),
+    #050506;
+}
+.subscriberFootnote {
+  margin: 13px 2px 0;
+  color: #686b71;
+  font-size: 11px;
+  line-height: 1.5;
+}
+@media (max-width: 760px) {
+  .subscriberSection { padding: 20px; }
+  .subscriberHeader { flex-direction: column; }
+  .subscriberActions { justify-content: flex-start; }
+}
