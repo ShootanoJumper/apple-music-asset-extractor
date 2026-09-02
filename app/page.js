@@ -279,8 +279,8 @@ export default function Home() {
                 className={downloadMode === "mp4" ? "preset active" : "preset"}
                 onClick={() => { setDownloadMode("mp4"); setSelectedFormat(null); }}
               >
-                <strong>MP4 Compatibility</strong>
-                <span>Prefer MP4 video + M4A audio</span>
+                <strong>H.264 Compatibility</strong>
+                <span>H.264/AVC video + AAC audio in MP4</span>
               </button>
             </div>
 
@@ -317,7 +317,7 @@ export default function Home() {
                 {downloadMode === "format" && selectedFormat
                   ? `${selectedFormat.height || "?"}p · ${shortCodec(selectedFormat.vcodec || selectedFormat.codec)} · ${selectedFormat.ext?.toUpperCase() || "AUTO"}`
                   : downloadMode === "mp4"
-                    ? "Best MP4-compatible combination"
+                    ? "H.264/AVC + AAC MP4"
                     : "Best available quality"}
               </div>
               <button

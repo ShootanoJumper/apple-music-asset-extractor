@@ -265,11 +265,14 @@ def download(
     if mode == "best":
         selector = "bv*+ba/b"
     elif mode == "mp4":
-        selector = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
+        # Compatibility mode is intentionally strict: H.264/AVC video plus
+        # AAC/M4A audio in MP4. Do not fall back to AV1/VP9-in-MP4 because
+        # many otherwise MP4-capable players cannot decode those codecs.
+        selector = "bv[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/b[vcodec^=avc1][ext=mp4]"
     else:
         selector = f"{format_id}+ba/{format_id}"
 
-    merge_format = {
+    merge_format = "mp4" if mode == "mp4" else {
         "auto": "mkv/mp4",
         "mp4": "mp4/mkv",
         "mkv": "mkv",
