@@ -1,66 +1,71 @@
-# Apple Music Asset Extractor
+# Media Extractor
 
-A Vercel-ready Next.js utility for inspecting Apple Music music-video metadata, downloading Apple-provided public assets, and playing full music videos through an authorized Apple Music subscription using MusicKit on the Web.
+A Next.js/Vercel frontend for Apple Music public assets plus a separate yt-dlp/FFmpeg media worker for YouTube videos the user owns or has permission to download.
 
-## What it does
+## Apple Music
 
-- Accepts `music.apple.com` music-video URLs
-- Extracts the Apple item ID and storefront
-- Resolves music-video metadata
-- Downloads Apple-provided public preview video
-- Downloads artwork as JPG or converts it to PNG
-- Exports metadata to JSON
-- Uses MusicKit on the Web for full subscriber playback after Apple Music authorization
-- Uses the Apple Music API for richer metadata such as 4K/HDR flags, ISRC, and HLS preview metadata when developer credentials are configured
+- Resolves `music.apple.com` music-video URLs
+- Downloads Apple-provided public preview video when available
+- Downloads artwork as JPG/PNG
+- Exports metadata JSON
+- Does not decrypt or bypass DRM-protected Apple Music subscription streams
 
-## What it intentionally does not do
+Apple developer credentials are optional. Without them, the app uses Apple's public iTunes lookup/search services and storefront fallbacks.
 
-It does not decrypt, defeat, or bypass DRM on full Apple Music subscription streams. Full videos are streamed by Apple's MusicKit player inside the browser.
+## YouTube
 
-## Local development
+- Detects YouTube URLs automatically
+- Analyzes available resolutions, codecs, FPS, HDR/SDR, and approximate sizes
+- Supports best-quality, MP4-compatible, or an explicitly selected video format
+- Downloads the selected permitted video and merges the best audio track with FFmpeg
+- Does not expose yt-dlp's direct media URLs to the browser
+- Requires the user to confirm they own the video or have permission to download it
+
+## Architecture
+
+```text
+Browser
+  |
+  v
+Next.js on Vercel
+  |-- Apple APIs (public metadata/assets)
+  |
+  `-- signed/authorized calls --> Railway worker
+                               |-- yt-dlp
+                               `-- FFmpeg
+```
+
+## Local frontend
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+## Deploy the YouTube worker to Railway
 
-## Apple Music / MusicKit setup
+1. Push the `worker/` directory with the rest of this repository.
+2. In Railway, create a new service from this GitHub repository.
+3. Set the Railway service Root Directory to `/worker`.
+4. Add a `MEDIA_WORKER_SECRET` variable.
+5. Generate a public Railway domain.
+6. In Vercel Project Settings -> Environment Variables, add:
 
-MusicKit subscriber playback requires Apple Music developer credentials. The recommended configuration lets the Vercel server generate a short-lived developer JWT on demand instead of storing a long-lived token.
-
-1. Use an Apple Developer Program team that can create Media IDs and Media Services keys.
-2. In Certificates, Identifiers & Profiles, create a Media ID with MusicKit enabled.
-3. Create a Media Services private key and associate it with the Media ID.
-4. In Vercel Project Settings → Environment Variables, add:
-
-```bash
-APPLE_MUSIC_TEAM_ID=YOUR_TEAM_ID
-APPLE_MUSIC_KEY_ID=YOUR_KEY_ID
-APPLE_MUSIC_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+```text
+MEDIA_WORKER_URL=https://your-worker.up.railway.app
+MEDIA_WORKER_SECRET=<the same secret from Railway>
 ```
 
-The app generates one-hour ES256 developer tokens server-side. Browser tokens are generated with an Apple `origin` claim tied to the deployed site's origin. The `.p8` private key stays on the server and is never returned to the browser.
+7. Redeploy the Vercel project.
 
-Never commit the `.p8` private key to GitHub.
+Generate a suitable secret in PowerShell:
 
-### Pre-generated token alternative
-
-If you prefer, you can instead set:
-
-```bash
-APPLE_MUSIC_DEVELOPER_TOKEN=your_signed_jwt_here
+```powershell
+$bytes = New-Object byte[] 32
+[Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+[Convert]::ToBase64String($bytes)
 ```
 
-That value takes precedence over automatic signing.
+## Notes
 
-Without developer credentials, metadata and public preview extraction still fall back to Apple's public iTunes Lookup API, but subscriber sign-in/full playback is disabled.
-
-## Subscriber authorization
-
-The browser loads Apple's MusicKit v3 library. When the user clicks **Sign in to Apple Music**, MusicKit handles the Apple account authorization and Music User Token. After authorization, the site queues the selected catalog music video and plays it in the page through MusicKit.
-
-## Deploy to Vercel
-
-Link/import the GitHub repository in Vercel. Next.js is auto-detected. Add the Apple Music environment variables above for Production (and Preview if desired), then redeploy.
+High-resolution YouTube formats commonly have separate video and audio streams. The worker uses yt-dlp to select them and FFmpeg to merge/remux them. Large 4K files need enough temporary disk space on the worker host.

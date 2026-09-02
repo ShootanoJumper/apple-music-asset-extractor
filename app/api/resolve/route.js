@@ -72,7 +72,7 @@ function normalizeText(value) {
 }
 
 function storefrontFallbacks(storefront) {
-  return [...new Set([storefront, "us", "ca", "gb", "au"].filter(Boolean))];
+  return [...new Set([storefront, "ca", "us", "gb", "au"].filter(Boolean))];
 }
 
 async function fetchItunesItem(id, storefront) {
@@ -95,47 +95,35 @@ async function searchItunesPreview(item, storefronts) {
   const wantedTitle = normalizeText(title);
   const term = encodeURIComponent(`${artist} ${title}`);
 
-  for (const candidateStorefront of storefronts) {
+  for (const storefront of storefronts) {
     try {
-      const country = candidateStorefront.toUpperCase();
+      const country = storefront.toUpperCase();
       const res = await fetch(
         `https://itunes.apple.com/search?term=${term}&country=${encodeURIComponent(country)}&entity=musicVideo&limit=25`,
         { cache: "no-store" }
       );
       if (!res.ok) continue;
-
       const json = await res.json();
-      const candidates = (json.results || []).filter(
-        (r) => r.kind === "music-video" && r.previewUrl
-      );
+      const candidates = (json.results || []).filter((r) => r.kind === "music-video" && r.previewUrl);
 
       const exact = candidates.find(
-        (r) =>
-          normalizeText(r.artistName) === wantedArtist &&
-          normalizeText(r.trackName) === wantedTitle
+        (r) => normalizeText(r.artistName) === wantedArtist && normalizeText(r.trackName) === wantedTitle
       );
-      if (exact?.previewUrl) {
-        return { url: exact.previewUrl, storefront: candidateStorefront };
-      }
+      if (exact?.previewUrl) return { url: exact.previewUrl, storefront };
 
-      const titleMatch = candidates.find(
-        (r) => normalizeText(r.trackName) === wantedTitle
-      );
-      if (titleMatch?.previewUrl) {
-        return { url: titleMatch.previewUrl, storefront: candidateStorefront };
-      }
+      const titleMatch = candidates.find((r) => normalizeText(r.trackName) === wantedTitle);
+      if (titleMatch?.previewUrl) return { url: titleMatch.previewUrl, storefront };
     } catch {
-      // Try the next storefront.
+      // Continue through storefront fallbacks.
     }
   }
-
   return null;
 }
 
 async function itunesLookup(id, storefront) {
   const storefronts = storefrontFallbacks(storefront);
   let item = null;
-  let itemStorefront = storefront;
+  let lookupStorefront = storefront;
   let preview = null;
 
   for (const candidateStorefront of storefronts) {
@@ -144,36 +132,26 @@ async function itunesLookup(id, storefront) {
 
     if (!item) {
       item = candidate;
-      itemStorefront = candidateStorefront;
+      lookupStorefront = candidateStorefront;
     }
-
     if (candidate.previewUrl) {
       preview = { url: candidate.previewUrl, storefront: candidateStorefront };
-      if (candidateStorefront === storefront) {
-        item = candidate;
-        itemStorefront = candidateStorefront;
-      }
+      if (candidateStorefront === storefront) item = candidate;
       break;
     }
   }
 
   if (!item) throw new Error("No music video was found for that Apple Music ID.");
-
-  if (!preview) {
-    preview = await searchItunesPreview(item, storefronts);
-  }
+  if (!preview) preview = await searchItunesPreview(item, storefronts);
 
   const resizeArtwork = (url, size) => {
     if (!url) return null;
     return url.replace(/\/\d+x\d+bb\.(jpg|jpeg|png)(\?.*)?$/i, `/${size}x${size}bb.jpg$2`);
   };
 
-  const artwork = resizeArtwork(item.artworkUrl100, 1200);
-  const original = resizeArtwork(item.artworkUrl100, 3000);
-
   return {
     id: String(item.trackId || id),
-    storefront: itemStorefront || storefront,
+    storefront: lookupStorefront || storefront,
     source: "iTunes Lookup API",
     title: item.trackName || "Unknown title",
     artist: item.artistName || "Unknown artist",
@@ -185,11 +163,15 @@ async function itunesLookup(id, storefront) {
     releaseDate: item.releaseDate || null,
     genreNames: item.primaryGenreName ? [item.primaryGenreName] : [],
     appleMusicUrl: item.trackViewUrl || null,
-    artwork: { displayUrl: artwork, originalUrl: original, bgColor: null },
+    artwork: {
+      displayUrl: resizeArtwork(item.artworkUrl100, 1200),
+      originalUrl: resizeArtwork(item.artworkUrl100, 3000),
+      bgColor: null
+    },
     preview: {
       url: preview?.url || item.previewUrl || null,
       hlsUrl: null,
-      storefront: preview?.storefront || itemStorefront || storefront
+      storefront: preview?.storefront || lookupStorefront || storefront
     }
   };
 }
@@ -210,8 +192,7 @@ export async function POST(request) {
       if (rich) return NextResponse.json(rich);
     }
 
-    const fallback = await itunesLookup(id, storefront);
-    return NextResponse.json(fallback);
+    return NextResponse.json(await itunesLookup(id, storefront));
   } catch (err) {
     return NextResponse.json({ error: err.message || "Unable to resolve the URL." }, { status: 400 });
   }
