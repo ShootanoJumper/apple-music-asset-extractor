@@ -7,7 +7,11 @@ export const dynamic = "force-dynamic";
 const SAFE_FORMAT_ID = /^[A-Za-z0-9._-]{1,80}$/;
 
 function getConfig() {
-  const base = process.env.MEDIA_WORKER_URL?.trim()?.replace(/\/$/, "");
+  let base = process.env.MEDIA_WORKER_URL?.trim()?.replace(/\/+$/, "");
+
+  if (base && !/^https?:\/\//i.test(base)) {
+    base = `https://${base}`;
+}
   const secret = process.env.MEDIA_WORKER_SECRET?.trim();
   if (!base) throw new Error("MEDIA_WORKER_URL is not configured in Vercel.");
   if (!secret) throw new Error("MEDIA_WORKER_SECRET is not configured in Vercel.");

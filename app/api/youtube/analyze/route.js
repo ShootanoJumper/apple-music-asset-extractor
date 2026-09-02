@@ -4,7 +4,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function workerConfig() {
-  const base = process.env.MEDIA_WORKER_URL?.trim()?.replace(/\/$/, "");
+  let base = process.env.MEDIA_WORKER_URL?.trim()?.replace(/\/+$/, "");
+
+  if (base && !/^https?:\/\//i.test(base)) {
+    base = `https://${base}`;
+}
   const secret = process.env.MEDIA_WORKER_SECRET?.trim();
   if (!base) throw new Error("MEDIA_WORKER_URL is not configured in Vercel.");
   return { base, secret };
