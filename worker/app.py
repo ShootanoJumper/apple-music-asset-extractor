@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -32,6 +33,15 @@ YOUTUBE_HOSTS = {
 }
 SAFE_FORMAT_ID = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 WORKER_SECRET = os.environ.get("MEDIA_WORKER_SECRET", "").strip()
+YOUTUBE_COOKIES_B64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
+YOUTUBE_USER_AGENT = os.environ.get("YOUTUBE_USER_AGENT", "").strip()
+
+YOUTUBE_AUTH_MARKERS = (
+    "sign in to confirm you're not a bot",
+    "sign in to confirm youâ€™re not a bot",
+    "use --cookies-from-browser",
+    "use --cookies for the authentication",
+)
 
 
 class AnalyzeRequest(BaseModel):
@@ -55,10 +65,10 @@ def require_worker_secret(value: str | None) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized worker request.")
 
 
-def run_ytdlp(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+def _run_ytdlp_once(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
     command = [sys.executable, "-m", "yt_dlp", *args]
     try:
-        result = subprocess.run(
+        return subprocess.run(
             command,
             capture_output=True,
             text=True,
@@ -68,10 +78,87 @@ def run_ytdlp(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(status_code=504, detail="YouTube operation timed out.") from exc
 
+
+def _needs_youtube_auth(result: subprocess.CompletedProcess[str]) -> bool:
+    text = f"{result.stderr or ''}\n{result.stdout or ''}".lower()
+    return any(marker in text for marker in YOUTUBE_AUTH_MARKERS)
+
+
+def _decoded_youtube_cookies() -> bytes:
+    if not YOUTUBE_COOKIES_B64:
+        raise HTTPException(
+            status_code=503,
+            detail="YouTube requested authentication, but YOUTUBE_COOKIES_B64 is not configured on Railway.",
+        )
+
+    try:
+        raw = base64.b64decode(YOUTUBE_COOKIES_B64, validate=True)
+        text = raw.decode("utf-8-sig")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="YOUTUBE_COOKIES_B64 is invalid. Re-export and Base64-encode the Netscape cookies.txt file.",
+        ) from exc
+
+    # Railway runs Linux. Normalize Windows CRLF cookies files to LF.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.splitlines()
+    first_line = lines[0].strip() if lines else ""
+    if first_line not in {"# Netscape HTTP Cookie File", "# HTTP Cookie File"}:
+        raise HTTPException(
+            status_code=500,
+            detail="Decoded YouTube cookies are not in Netscape cookies.txt format.",
+        )
+
+    return text.encode("utf-8")
+
+
+def _run_ytdlp_with_cookies(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    fd, cookie_name = tempfile.mkstemp(prefix="youtube-cookies-", suffix=".txt")
+    cookie_path = Path(cookie_name)
+
+    try:
+        os.close(fd)
+        cookie_path.write_bytes(_decoded_youtube_cookies())
+        try:
+            os.chmod(cookie_path, 0o600)
+        except OSError:
+            pass
+
+        authenticated_args = ["--cookies", str(cookie_path)]
+        if YOUTUBE_USER_AGENT:
+            authenticated_args.extend(["--user-agent", YOUTUBE_USER_AGENT])
+        authenticated_args.extend(args)
+
+        return _run_ytdlp_once(authenticated_args, timeout)
+    finally:
+        try:
+            cookie_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def run_ytdlp(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    # Keep ordinary requests anonymous. Only use account cookies when YouTube
+    # explicitly rejects the Railway request with its authentication/bot check.
+    result = _run_ytdlp_once(args, timeout)
+
+    if result.returncode != 0 and _needs_youtube_auth(result):
+        if not YOUTUBE_COOKIES_B64:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "YouTube asked for authentication. Configure YOUTUBE_COOKIES_B64 "
+                    "on Railway, redeploy the worker, and try again."
+                ),
+            )
+        result = _run_ytdlp_with_cookies(args, timeout)
+
     if result.returncode != 0:
         message = (result.stderr or result.stdout or "yt-dlp failed").strip().splitlines()
         detail = message[-1] if message else "yt-dlp failed"
         raise HTTPException(status_code=422, detail=detail[:500])
+
     return result
 
 
@@ -212,6 +299,7 @@ def health() -> dict:
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ytDlp": True,
         "signedDownloads": bool(WORKER_SECRET),
+        "youtubeCookiesConfigured": bool(YOUTUBE_COOKIES_B64),
     }
 
 
