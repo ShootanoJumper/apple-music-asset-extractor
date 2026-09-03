@@ -127,7 +127,7 @@ export default function Home() {
     const params = new URLSearchParams({
       url,
       mode,
-      container: mode === "mp4" ? "mp4" : "auto",
+      container: ["mp4", "video_only"].includes(mode) ? "mp4" : "auto",
       confirm: "1"
     });
     if (formatId) params.set("format_id", formatId);
@@ -285,6 +285,42 @@ export default function Home() {
             </div>
 
             <div className="formatListHeader">
+              <strong>Split files for editing</strong>
+              <span>Download a silent H.264 MP4 and a separate audio file for editors such as Clipchamp.</span>
+            </div>
+
+            <div className="presetGrid">
+              <button
+                className={downloadMode === "video_only" ? "preset active" : "preset"}
+                onClick={() => { setDownloadMode("video_only"); setSelectedFormat(null); }}
+              >
+                <strong>Video Only</strong>
+                <span>H.264 MP4 Â· no audio</span>
+              </button>
+              <button
+                className={downloadMode === "audio_wav" ? "preset active" : "preset"}
+                onClick={() => { setDownloadMode("audio_wav"); setSelectedFormat(null); }}
+              >
+                <strong>WAV for Editing</strong>
+                <span>PCM Â· 48 kHz Â· stereo</span>
+              </button>
+              <button
+                className={downloadMode === "audio_mp3" ? "preset active" : "preset"}
+                onClick={() => { setDownloadMode("audio_mp3"); setSelectedFormat(null); }}
+              >
+                <strong>MP3</strong>
+                <span>320 kbps Â· 48 kHz Â· stereo</span>
+              </button>
+              <button
+                className={downloadMode === "audio_original" ? "preset active" : "preset"}
+                onClick={() => { setDownloadMode("audio_original"); setSelectedFormat(null); }}
+              >
+                <strong>Original Audio</strong>
+                <span>Best native audio Â· no re-encode</span>
+              </button>
+            </div>
+
+            <div className="formatListHeader">
               <strong>Available video streams</strong>
               <span>Select an exact video stream; best audio is merged automatically.</span>
             </div>
@@ -318,7 +354,15 @@ export default function Home() {
                   ? `${selectedFormat.height || "?"}p · ${shortCodec(selectedFormat.vcodec || selectedFormat.codec)} · ${selectedFormat.ext?.toUpperCase() || "AUTO"}`
                   : downloadMode === "mp4"
                     ? "H.264/AVC + AAC MP4"
-                    : "Best available quality"}
+                    : downloadMode === "video_only"
+                      ? "H.264 MP4 video only Â· no audio"
+                      : downloadMode === "audio_wav"
+                        ? "WAV Â· PCM 16-bit Â· 48 kHz stereo"
+                        : downloadMode === "audio_mp3"
+                          ? "MP3 Â· 320 kbps Â· 48 kHz stereo"
+                          : downloadMode === "audio_original"
+                            ? "Best native audio Â· no re-encode"
+                            : "Best available quality"}
               </div>
               <button
                 className="downloadButton"

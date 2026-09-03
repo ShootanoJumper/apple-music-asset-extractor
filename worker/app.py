@@ -75,6 +75,28 @@ def run_ytdlp(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]
     return result
 
 
+def run_ffmpeg(args: list[str], timeout: int = 30 * 60) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(status_code=500, detail="FFmpeg is not installed on the media worker.")
+
+    try:
+        result = subprocess.run(
+            [ffmpeg, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="FFmpeg conversion timed out.") from exc
+
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "ffmpeg failed").strip().splitlines()
+        detail = message[-1] if message else "ffmpeg failed"
+        raise HTTPException(status_code=422, detail=detail[:500])
+
+
 def codec_name(value: str | None) -> str | None:
     if not value or value == "none":
         return None
@@ -253,7 +275,7 @@ def download(
         raise HTTPException(status_code=400, detail="Permission confirmation is required.")
 
     url = clean_youtube_url(url)
-    if mode not in {"best", "mp4", "format"}:
+    if mode not in {"best", "mp4", "format", "video_only", "audio_mp3", "audio_wav", "audio_original"}:
         raise HTTPException(status_code=400, detail="Invalid download mode.")
     if container not in {"auto", "mp4", "mkv"}:
         raise HTTPException(status_code=400, detail="Invalid output container.")
@@ -269,10 +291,15 @@ def download(
         # AAC/M4A audio in MP4. Do not fall back to AV1/VP9-in-MP4 because
         # many otherwise MP4-capable players cannot decode those codecs.
         selector = "bv[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/b[vcodec^=avc1][ext=mp4]"
+    elif mode == "video_only":
+        # Clipchamp-friendly silent video: native H.264 MP4 stream, no audio.
+        selector = "bv[vcodec^=avc1][ext=mp4]"
+    elif mode in {"audio_mp3", "audio_wav", "audio_original"}:
+        selector = "ba"
     else:
         selector = f"{format_id}+ba/{format_id}"
 
-    merge_format = "mp4" if mode == "mp4" else {
+    merge_format = "mp4" if mode in {"mp4", "video_only"} else {
         "auto": "mkv/mp4",
         "mp4": "mp4/mkv",
         "mkv": "mkv",
@@ -282,21 +309,20 @@ def download(
     output_template = str(temp_dir / "%(title).140B [%(id)s].%(ext)s")
 
     try:
-        run_ytdlp(
-            [
-                "--no-playlist",
-                "--no-warnings",
-                "--restrict-filenames",
-                "--format",
-                selector,
-                "--merge-output-format",
-                merge_format,
-                "--output",
-                output_template,
-                url,
-            ],
-            timeout=30 * 60,
-        )
+        ytdlp_args = [
+            "--no-playlist",
+            "--no-warnings",
+            "--restrict-filenames",
+            "--format",
+            selector,
+            "--output",
+            output_template,
+        ]
+        if mode not in {"audio_mp3", "audio_wav", "audio_original"}:
+            ytdlp_args.extend(["--merge-output-format", merge_format])
+        ytdlp_args.append(url)
+
+        run_ytdlp(ytdlp_args, timeout=30 * 60)
 
         candidates = [
             p
@@ -307,6 +333,45 @@ def download(
             raise HTTPException(status_code=500, detail="The download finished but no output file was produced.")
 
         output = max(candidates, key=lambda p: p.stat().st_size)
+
+        if mode == "audio_mp3":
+            converted = temp_dir / f"{output.stem} [MP3 320k].mp3"
+            run_ffmpeg(
+                [
+                    "-y",
+                    "-i",
+                    str(output),
+                    "-vn",
+                    "-c:a",
+                    "libmp3lame",
+                    "-b:a",
+                    "320k",
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "2",
+                    str(converted),
+                ]
+            )
+            output = converted
+        elif mode == "audio_wav":
+            converted = temp_dir / f"{output.stem} [WAV 48k].wav"
+            run_ffmpeg(
+                [
+                    "-y",
+                    "-i",
+                    str(output),
+                    "-vn",
+                    "-c:a",
+                    "pcm_s16le",
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "2",
+                    str(converted),
+                ]
+            )
+            output = converted
         media_type = mimetypes.guess_type(output.name)[0] or "application/octet-stream"
         return FileResponse(
             output,

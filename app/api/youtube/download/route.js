@@ -38,7 +38,7 @@ export async function GET(request) {
       );
     }
 
-    if (!["best", "mp4", "format"].includes(mode)) {
+    if (!["best", "mp4", "format", "video_only", "audio_mp3", "audio_wav", "audio_original"].includes(mode)) {
       return NextResponse.json({ error: "Invalid download mode." }, { status: 400 });
     }
     if (!["auto", "mp4", "mkv"].includes(container)) {
